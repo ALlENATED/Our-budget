@@ -18,10 +18,8 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-  import { getFirestore, collection, doc, onSnapshot, addDoc, updateDoc, deleteDoc,
-           setDoc, getDoc, query, orderBy, serverTimestamp }
+  import { getFirestore, collection, doc, onSnapshot, addDoc, updateDoc, deleteDoc,setDoc, getDoc, getDocs, query, orderBy, serverTimestamp }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-
   /*
    * Firebase config — the exact values from your Firebase project.
    * These identify which Firebase project the app talks to.
@@ -46,7 +44,7 @@
   window.FB = { app, auth, db,
     GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
     collection, doc, onSnapshot, addDoc, updateDoc, deleteDoc,
-    setDoc, getDoc, query, orderBy, serverTimestamp };
+    setDoc, getDoc, getDocs, query, orderBy, serverTimestamp };
 
   // Load the main app module AFTER Firebase is ready
   import('./app.js');

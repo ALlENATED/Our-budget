@@ -68,9 +68,6 @@ const ScreenRenderers = {};
 
 // ============================================================
 // 3. AUTH FLOW — GOOGLE SIGN-IN
-// ------------------------------------------------------------
-// One button: "Sign in with Google". Uses a popup window.
-// On mobile, if the popup is blocked, we fall back to redirect.
 // ============================================================
 FB.onAuthStateChanged(FB.auth, async (user) => {
   if (user) {
@@ -89,7 +86,6 @@ document.getElementById('google-signin').addEventListener('click', async () => {
   try {
     await FB.signInWithPopup(FB.auth, provider);
   } catch (err) {
-    // Popup blocked (common on mobile Safari/Chrome)
     if (err.code === 'auth/popup-blocked' || err.code === 'auth/popup-closed-by-user') {
       toast('Popup blocked. Please allow popups for this site.');
     } else if (err.code === 'auth/unauthorized-domain') {
