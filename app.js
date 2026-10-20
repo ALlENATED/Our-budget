@@ -1,88 +1,59 @@
 /*
  * app.js — the entire application logic.
  *
- * Structure (top to bottom):
- *   1.  Firebase connection (comes from index.html via window.FB)
- *   2.  Global state (App object)
- *   3.  Auth flow (login screen → app)
- *   4.  Firestore data structure
- *   5.  Bootstrapping (loading data on login)
- *   6.  Real-time listeners (Firestore → live UI updates)
+ * Firebase is initialized in index.html. Everything here uses the
+ * window.FB object that index.html exposes.
+ *
+ * Structure:
+ *   1.  Firebase connection and constants
+ *   2.  Global state
+ *   3.  Auth flow (email + password)
+ *   4.  Firestore references
+ *   5.  Bootstrap (startApp)
+ *   6.  Real-time listeners (attachListeners)
  *   7.  Shared helpers (formatting, DOM, toast, sheets)
  *   8.  Tab bar
  *   9.  Screen registry
- *   10. Screen renderers — Home, Categories, Buy, ToPay, History, Settings
- *   11. Editor sheets — expense, category, To Pay item, buy item
- *   12. Pickers — colors (50), tones (15)
- *   13. Boot sequence
- *
- * How the data is organized in Firestore:
- *
- *   /budgets/shared               → document with { totalBudget, currency,
- *                                                     periodStartDay, toPayResetDay,
- *                                                     theme, heroTone, appName, timezone }
- *   /budgets/shared/categories/{id}   → { name, limit, colorKey, icon, parentId, pinOrder, createdAt }
- *   /budgets/shared/expenses/{id}     → { name, amount, categoryId, subcategoryId, dateAdded, periodKey }
- *   /budgets/shared/toPay/{id}        → { name, amount, dueDate, paid, paidDate, isSubscription,
- *                                         remindWith, emailTo, reminderRules, createdAt }
- *   /budgets/shared/buy/{id}          → { name, checked, createdAt, checkedAt }
- *   /budgets/shared/history/{periodKey} → { periodLabel, budgetSnapshot, totalSpent }
- *
- * Why "/budgets/shared" (a single document) and not per-user:
- *   This app is for two people with ONE shared budget. Both sign in with
- *   their own Google account but read and write the same data. Firestore
- *   rules (added later) will allow only the two accounts to read/write
- *   this subtree.
+ *   10. Screen renderers
+ *   11. Editor sheets
+ *   12. Pickers
+ *   13. Boot
  */
 
 // ============================================================
 // 1. FIREBASE
-// ------------------------------------------------------------
-// window.FB was set by the module in index.html and contains:
-//   auth, db, signInWithPopup, signOut, onAuthStateChanged,
-//   GoogleAuthProvider, collection, doc, onSnapshot, addDoc,
-//   updateDoc, deleteDoc, setDoc, getDoc, query, orderBy, serverTimestamp
 // ============================================================
 const FB = window.FB;
-
-// The single document ID that holds the shared budget.
-// If you ever want multiple budgets (e.g. personal + joint), this
-// would become a parameter. For now, hardcoded.
 const BUDGET_ID = 'shared';
 
 // ============================================================
 // 2. GLOBAL STATE
-// ------------------------------------------------------------
-// One object that holds everything the UI needs. Populated by the
-// Firestore listeners, mutated by user actions.
 // ============================================================
 const App = {
-  user: null,         // Firebase Auth user object after sign-in
-  settings: null,     // /budgets/shared document data
-  categories: [],     // active + archived
-  expenses: [],       // all (filtered by period at render time)
-  toPay: [],          // all items (active + archived)
-  buy: [],            // shopping list
-  history: [],        // per-period snapshots
-  screen: 'home',     // current screen id
-  historyYear: null,  // year currently shown in History
-  toastTimer: null,   // handle for toast auto-dismiss
-  listeners: [],      // Firestore listener unsubscribe functions
+  user: null,
+  settings: null,
+  categories: [],
+  expenses: [],
+  toPay: [],
+  buy: [],
+  history: [],
+  screen: 'home',
+  historyYear: null,
+  toastTimer: null,
+  listeners: [],
 };
 
-// Default settings written on first boot if /budgets/shared doesn't exist.
 const DEFAULT_SETTINGS = {
   appName: 'Our Budget',
   currency: 'SEK',
   totalBudget: 12000,
-  periodStartDay: 25,     // day of month the budget period starts
-  toPayResetDay: 'last',  // 'last' or a number 1–28
+  periodStartDay: 25,
+  toPayResetDay: 'last',
   timezone: 'Europe/Stockholm',
   theme: 'system',
   heroTone: 'forest',
 };
 
-// The tab bar definition. `id` must match a screen renderer id.
 const TABS = [
   { id: 'home',       label: 'Home',       icon: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9.5"/>' },
   { id: 'categories', label: 'Categories', icon: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>' },
@@ -93,24 +64,13 @@ const TABS = [
 ];
 
 const SCREENS = TABS.map(t => t.id);
-
-// Screen renderers are registered here — each screen function is
-// assigned in the section below (Screen renderers).
 const ScreenRenderers = {};
 
-// // ============================================================
-// 3. AUTH FLOW
+// ============================================================
+// 3. AUTH FLOW — GOOGLE SIGN-IN
 // ------------------------------------------------------------
-// On page load:
-//   1. Show loading overlay.
-//   2. Ask Firebase if a user is already signed in.
-//   3. If yes → start the app (attach Firestore listeners).
-//   4. If no → show the login screen with email + password fields.
-//
-// Email/password auth is used instead of Google Sign-In because the
-// email field is reliably present in the auth token for email/password
-// accounts. This makes the Firestore security rules
-// (request.auth.token.email in [...]) work without any caveats.
+// One button: "Sign in with Google". Uses a popup window.
+// On mobile, if the popup is blocked, we fall back to redirect.
 // ============================================================
 FB.onAuthStateChanged(FB.auth, async (user) => {
   if (user) {
@@ -124,7 +84,22 @@ FB.onAuthStateChanged(FB.auth, async (user) => {
   }
 });
 
-// Helper: read the three input/error elements at once
+document.getElementById('google-signin').addEventListener('click', async () => {
+  const provider = new FB.GoogleAuthProvider();
+  try {
+    await FB.signInWithPopup(FB.auth, provider);
+  } catch (err) {
+    // Popup blocked (common on mobile Safari/Chrome)
+    if (err.code === 'auth/popup-blocked' || err.code === 'auth/popup-closed-by-user') {
+      toast('Popup blocked. Please allow popups for this site.');
+    } else if (err.code === 'auth/unauthorized-domain') {
+      toast('This domain is not authorized. Check Firebase settings.');
+    } else {
+      toast('Could not sign in: ' + err.message);
+    }
+  }
+});
+
 function getLoginFields() {
   return {
     email: document.getElementById('login-email').value.trim(),
@@ -133,30 +108,20 @@ function getLoginFields() {
   };
 }
 
-// Helper: show an error message under the login form
 function showLoginError(msg) {
   const el = document.getElementById('login-error');
   el.textContent = msg;
   el.style.display = 'block';
 }
 
-// Sign in with an existing account
 document.getElementById('login-btn').addEventListener('click', async () => {
   const { email, password, errorEl } = getLoginFields();
   errorEl.style.display = 'none';
-
-  if (!email || !password) {
-    showLoginError('Please enter email and password.');
-    return;
-  }
-
+  if (!email || !password) { showLoginError('Please enter email and password.'); return; }
   try {
     await FB.signInWithEmailAndPassword(FB.auth, email, password);
   } catch (err) {
-    // Friendly messages for the common failure cases
-    if (err.code === 'auth/invalid-credential'
-        || err.code === 'auth/wrong-password'
-        || err.code === 'auth/user-not-found') {
+    if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
       showLoginError('Wrong email or password.');
     } else if (err.code === 'auth/too-many-requests') {
       showLoginError('Too many attempts. Try again in a few minutes.');
@@ -166,23 +131,13 @@ document.getElementById('login-btn').addEventListener('click', async () => {
   }
 });
 
-// Create a new account
 document.getElementById('signup-btn').addEventListener('click', async () => {
   const { email, password, errorEl } = getLoginFields();
   errorEl.style.display = 'none';
-
-  if (!email || !password) {
-    showLoginError('Enter email and password to create an account.');
-    return;
-  }
-  if (password.length < 6) {
-    showLoginError('Password must be at least 6 characters.');
-    return;
-  }
-
+  if (!email || !password) { showLoginError('Enter email and password.'); return; }
+  if (password.length < 6) { showLoginError('Password must be at least 6 characters.'); return; }
   try {
     await FB.createUserWithEmailAndPassword(FB.auth, email, password);
-    // onAuthStateChanged will fire automatically and start the app.
   } catch (err) {
     if (err.code === 'auth/email-already-in-use') {
       showLoginError('An account with this email already exists. Tap "Sign in".');
@@ -198,91 +153,76 @@ document.getElementById('signup-btn').addEventListener('click', async () => {
 
 // ============================================================
 // 4. FIRESTORE REFERENCES
-// ------------------------------------------------------------
-// These helpers just build paths. The actual writes/reads happen
-// in the specific action functions further down.
 // ============================================================
-function budgetDoc() {
-  return FB.doc(FB.db, 'budgets', BUDGET_ID);
-}
-function categoriesCol() {
-  return FB.collection(FB.db, 'budgets', BUDGET_ID, 'categories');
-}
-function expensesCol() {
-  return FB.collection(FB.db, 'budgets', BUDGET_ID, 'expenses');
-}
-function toPayCol() {
-  return FB.collection(FB.db, 'budgets', BUDGET_ID, 'toPay');
-}
-function buyCol() {
-  return FB.collection(FB.db, 'budgets', BUDGET_ID, 'buy');
-}
-function historyCol() {
-  return FB.collection(FB.db, 'budgets', BUDGET_ID, 'history');
-}
+function budgetDoc()    { return FB.doc(FB.db, 'budgets', BUDGET_ID); }
+function categoriesCol(){ return FB.collection(FB.db, 'budgets', BUDGET_ID, 'categories'); }
+function expensesCol()  { return FB.collection(FB.db, 'budgets', BUDGET_ID, 'expenses'); }
+function toPayCol()     { return FB.collection(FB.db, 'budgets', BUDGET_ID, 'toPay'); }
+function buyCol()       { return FB.collection(FB.db, 'budgets', BUDGET_ID, 'buy'); }
+function historyCol()   { return FB.collection(FB.db, 'budgets', BUDGET_ID, 'history'); }
 
 // ============================================================
-// 5. BOOTSTRAP — called once after the user signs in
+// 5. BOOTSTRAP
 // ------------------------------------------------------------
-// Steps:
-//   1. Ensure the /budgets/shared document exists (create defaults
-//      if first-ever boot for this project).
-//   2. Seed starter categories if Categories is empty on first boot.
-//   3. Attach real-time listeners to every collection.
-//   4. Mount the screens, render everything, hide the loading overlay.
+// Called once after the user signs in.
+//
+// CRITICAL: we wait for the auth token to be present BEFORE
+// attaching any Firestore listeners. Without this wait, the
+// snapshot listeners fire as unauthenticated requests and get
+// rejected with permission-denied.
 // ============================================================
 async function startApp() {
-  // 1. Ensure the shared budget document exists.
+  // Step 1: ensure the shared budget document exists.
   const snap = await FB.getDoc(budgetDoc());
   if (!snap.exists()) {
     await FB.setDoc(budgetDoc(), DEFAULT_SETTINGS);
   }
 
-  // 2. Seed starter categories the very first time.
-  const catsSnap = await FB.getDoc(budgetDoc()); // reuse to avoid re-read
-  const existingCats = await new Promise((resolve) => {
-    const unsub = FB.onSnapshot(categoriesCol(), s => { unsub(); resolve(s.size); });
-  });
-  if (existingCats === 0) {
+  // Step 2: seed starter categories on first ever boot.
+  const catsSnap = await FB.getDocs(categoriesCol()).catch(() => null);
+  if (catsSnap && catsSnap.size === 0) {
     const now = new Date().toISOString();
     const seed = [
-      { name:'Groceries',     icon:'🛒', limit:5000, colorKey:'green',  parentId:'', pinOrder:0, createdAt:now },
-      { name:'Transport',     icon:'🚌', limit:1500, colorKey:'blue',   parentId:'', pinOrder:0, createdAt:now },
-      { name:'Dining out',    icon:'🍽️', limit:1000, colorKey:'red',    parentId:'', pinOrder:0, createdAt:now },
-      { name:'Utilities',     icon:'💡', limit:2000, colorKey:'amber',  parentId:'', pinOrder:0, createdAt:now },
-      { name:'Entertainment', icon:'🎬', limit:1500, colorKey:'purple', parentId:'', pinOrder:0, createdAt:now },
-      { name:'Health',        icon:'💊', limit:1000, colorKey:'teal',   parentId:'', pinOrder:0, createdAt:now },
+      { name: 'Groceries',     icon: '🛒', limit: 5000, colorKey: 'green',  parentId: '', pinOrder: 0, createdAt: now },
+      { name: 'Transport',     icon: '🚌', limit: 1500, colorKey: 'blue',   parentId: '', pinOrder: 0, createdAt: now },
+      { name: 'Dining out',    icon: '🍽️', limit: 1000, colorKey: 'red',    parentId: '', pinOrder: 0, createdAt: now },
+      { name: 'Utilities',     icon: '💡', limit: 2000, colorKey: 'amber',  parentId: '', pinOrder: 0, createdAt: now },
+      { name: 'Entertainment', icon: '🎬', limit: 1500, colorKey: 'purple', parentId: '', pinOrder: 0, createdAt: now },
+      { name: 'Health',        icon: '💊', limit: 1000, colorKey: 'teal',   parentId: '', pinOrder: 0, createdAt: now },
     ];
     for (const cat of seed) {
       await FB.addDoc(categoriesCol(), cat);
     }
   }
 
-  // 3. Attach real-time listeners.
+  // Step 3: wait for the auth token to be ready, THEN attach listeners.
+  if (FB.auth.currentUser) {
+    try {
+      await FB.auth.currentUser.getIdToken();
+    } catch (err) {
+      console.error('Auth token fetch failed:', err);
+    }
+  }
+
+  // Step 4: attach real-time listeners.
   attachListeners();
 
-  // 4. Render.
+  // Step 5: render.
   mountScreens();
   renderTabbar();
   goScreen('home');
 
-  // 5. Hide loading overlay.
+  // Step 6: hide loading overlay.
   document.getElementById('loading').classList.add('hidden');
 }
 
 // ============================================================
 // 6. REAL-TIME LISTENERS
 // ------------------------------------------------------------
-// Each onSnapshot fires every time the Firestore data changes.
-// Because both you and your partner are listening to the same
-// collection, when one of you adds an expense, the other's UI
-// updates instantly.
-//
-// Ordering: sorted by createdAt or dateAdded so the UI doesn't
-// jump around when new documents arrive.
+// Every listener stores its unsubscribe function in App.listeners
+// so we could detach them if the user signs out.
 // ============================================================
 function attachListeners() {
-  // Settings document
   App.listeners.push(FB.onSnapshot(budgetDoc(), (snap) => {
     if (snap.exists()) {
       App.settings = snap.data();
@@ -291,72 +231,50 @@ function attachListeners() {
     }
   }));
 
-  // Categories — ordered by createdAt (stable insertion order)
   App.listeners.push(FB.onSnapshot(
     FB.query(categoriesCol(), FB.orderBy('createdAt')),
     (snap) => {
       App.categories = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      rerender([App.screen]);
+      if (App.screen === 'categories' || App.screen === 'home' || App.screen === 'settings') renderScreen(App.screen);
     }
   ));
 
-  // Expenses — ordered by dateAdded descending (newest first)
   App.listeners.push(FB.onSnapshot(
     FB.query(expensesCol(), FB.orderBy('dateAdded', 'desc')),
     (snap) => {
       App.expenses = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      rerender([App.screen]);
+      if (App.screen === 'home' || App.screen === 'categories') renderScreen(App.screen);
     }
   ));
 
-  // To Pay — ordered by createdAt
   App.listeners.push(FB.onSnapshot(
     FB.query(toPayCol(), FB.orderBy('createdAt')),
     (snap) => {
       App.toPay = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      rerender([App.screen]);
+      if (App.screen === 'topay') renderScreen(App.screen);
     }
   ));
 
-  // Buy — ordered by createdAt
   App.listeners.push(FB.onSnapshot(
     FB.query(buyCol(), FB.orderBy('createdAt')),
     (snap) => {
       App.buy = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      rerender([App.screen]);
+      if (App.screen === 'buy') renderScreen(App.screen);
     }
   ));
 
-  // History — ordered by periodKey (descending)
   App.listeners.push(FB.onSnapshot(
     FB.query(historyCol(), FB.orderBy('periodKey', 'desc')),
     (snap) => {
       App.history = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      if (App.screen === 'history') renderScreen('history');
+      if (App.screen === 'history') renderScreen(App.screen);
     }
   ));
-}
-
-// Re-render a list of screens. Bails out if App.settings isn't ready
-// yet (initial render before the settings listener has fired).
-function rerender(ids) {
-  if (!App.settings) return;
-  ids.forEach(id => {
-    // Only re-render the currently active screen to keep it snappy.
-    // Inactive screens re-render when they're navigated to.
-    if (App.screen === id) renderScreen(id);
-  });
-  // If the current screen depends on the changed data but wasn't in
-  // `ids`, nothing happens — that's intentional. When you switch tabs,
-  // goScreen re-renders the target screen with current data.
 }
 
 // ============================================================
 // 7. SHARED HELPERS
 // ============================================================
-
-// Format a number as an integer with optional currency suffix.
-// No thousands separators per the user's request.
 function fmtAmount(n, withCurrency) {
   const num = Number(n) || 0;
   const s = String(Math.round(num));
@@ -364,7 +282,6 @@ function fmtAmount(n, withCurrency) {
   return s;
 }
 
-// ISO date → "12 Mar"
 function fmtDateShort(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -372,7 +289,6 @@ function fmtDateShort(iso) {
   return d.getDate() + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
 }
 
-// Days from today to ISO date. Negative = overdue.
 function daysUntil(iso) {
   if (!iso) return null;
   const d = new Date(iso);
@@ -381,7 +297,6 @@ function daysUntil(iso) {
   return Math.round((d - t) / 86400000);
 }
 
-// HTML-escape for safe interpolation into innerHTML.
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
@@ -391,7 +306,6 @@ function esc(s) {
     .replace(/'/g, '&#39;');
 }
 
-// Tiny element builder: h('div', {class:'x'}, ['child', node])
 function h(tag, attrs, children) {
   const el = document.createElement(tag);
   if (attrs) {
@@ -414,12 +328,10 @@ function h(tag, attrs, children) {
   return el;
 }
 
-// SVG icon wrapper for the tab bar
 function svgIcon(paths) {
   return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + paths + '</svg>';
 }
 
-// Toast — small notification. Auto-dismisses after 3.5s.
 function toast(message, action, onAction) {
   const el = document.getElementById('toast');
   el.innerHTML = '';
@@ -438,21 +350,17 @@ function hideToast() {
   document.getElementById('toast').classList.remove('show');
 }
 
-// Sheet (modal) primitives
 function openSheet(builder) {
   const root = document.getElementById('sheet-root');
   root.innerHTML = '';
-
   const overlay = h('div', { class: 'overlay show', onclick: closeSheet });
   const sheet = h('div', { class: 'sheet' });
   const grab = h('div', { class: 'grab' });
   const body = h('div', { class: 'sheet-body' });
-
   sheet.appendChild(grab);
   sheet.appendChild(body);
   root.appendChild(overlay);
   root.appendChild(sheet);
-
   requestAnimationFrame(() => sheet.classList.add('show'));
   builder(body, sheet);
 }
@@ -466,8 +374,6 @@ function closeSheet() {
   setTimeout(() => { root.innerHTML = ''; }, 250);
 }
 
-// Apply theme + tone from settings to <body>. Called whenever
-// settings change (including from the other user's device).
 function applyThemeAndTone() {
   if (!App.settings) return;
   document.body.setAttribute('data-tone', App.settings.heroTone || 'forest');
@@ -478,7 +384,6 @@ function applyThemeAndTone() {
   document.body.setAttribute('data-theme', theme);
 }
 
-// Follow OS theme changes when the user is on "system"
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (App.settings && App.settings.theme === 'system') applyThemeAndTone();
 });
@@ -530,23 +435,15 @@ function goScreen(id) {
 
 // ============================================================
 // 10. SCREEN — HOME
-// ------------------------------------------------------------
-// Shows: header, period pill, hero card (remaining/budget/spent/days),
-// pinned categories (up to 3), quick-add row, recent expenses feed.
 // ============================================================
 ScreenRenderers.home = function () {
   const s = App.settings || DEFAULT_SETTINGS;
   const period = computeCurrentPeriod(s.periodStartDay);
-
-  // Which expenses belong to this period?
   const expenses = App.expenses.filter(e => e.periodKey === period.key);
   const categories = App.categories;
-
-  // Build an ID → category lookup.
   const byId = {};
   categories.forEach(c => { byId[c.id] = c; });
 
-  // Aggregate spend per category (parent + subcategory).
   const spentByCat = {};
   expenses.forEach(e => {
     if (e.categoryId) spentByCat[e.categoryId] = (spentByCat[e.categoryId] || 0) + Number(e.amount || 0);
@@ -559,10 +456,8 @@ ScreenRenderers.home = function () {
   const pctUsed = totalBudget > 0 ? Math.round((totalSpent / totalBudget) * 100) : 0;
   const pctLeft = 100 - pctUsed;
 
-  // ---- Root ----
   const wrap = document.createElement('div');
 
-  // Header
   const greeting = (() => {
     const hr = new Date().getHours();
     return hr < 12 ? 'Good morning,' : hr < 18 ? 'Good afternoon,' : 'Good evening,';
@@ -575,13 +470,11 @@ ScreenRenderers.home = function () {
     '<div class="avatar">' + (s.appName || 'OB').slice(0, 2).toUpperCase() + '</div>';
   wrap.appendChild(head);
 
-  // Period pill
   const pill = document.createElement('div');
   pill.className = 'period-pill';
   pill.innerHTML = '<span class="dot"></span><span>' + esc(period.label) + '</span><span class="chev">›</span>';
   wrap.appendChild(pill);
 
-  // Hero
   const hero = document.createElement('div');
   hero.className = 'hero';
   hero.innerHTML =
@@ -601,7 +494,6 @@ ScreenRenderers.home = function () {
     '</div>';
   wrap.appendChild(hero);
 
-  // Pinned
   const pinned = categories
     .filter(c => Number(c.pinOrder) > 0)
     .sort((a, b) => Number(a.pinOrder) - Number(b.pinOrder))
@@ -621,10 +513,8 @@ ScreenRenderers.home = function () {
       const el = document.createElement('div');
       el.className = 'pin c-' + (c.colorKey || 'blue') + (over ? ' over' : '');
       el.innerHTML =
-        '<div class="top">' +
-          '<div class="ico">' + esc(c.icon || '🏷️') + '</div>' +
-          '<div class="n">' + esc(c.name) + '</div>' +
-        '</div>' +
+        '<div class="top"><div class="ico">' + esc(c.icon || '🏷️') + '</div>' +
+        '<div class="n">' + esc(c.name) + '</div></div>' +
         '<div class="bar"><div style="width:' + pct + '%"></div></div>' +
         '<div class="v"><b>' + fmtAmount(spent) + '</b> / ' + fmtAmount(limit) + '</div>';
       el.onclick = () => goScreen('categories');
@@ -634,19 +524,16 @@ ScreenRenderers.home = function () {
     wrap.appendChild(pinWrap);
   }
 
-  // Quick-add
   const qa = document.createElement('div');
   qa.className = 'quickadd';
   qa.innerHTML = '<div class="plus">＋</div><input placeholder="Add an expense…" id="qa-input"><button class="go" id="qa-add">Add</button>';
   wrap.appendChild(qa);
 
-  // Section header
   const sechead = document.createElement('div');
   sechead.className = 'sechead';
   sechead.innerHTML = '<h2>Recent</h2><span class="meta">' + fmtAmount(totalSpent) + ' this period</span>';
   wrap.appendChild(sechead);
 
-  // Feed
   if (!expenses.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
@@ -655,32 +542,26 @@ ScreenRenderers.home = function () {
   } else {
     const feed = document.createElement('div');
     feed.className = 'feed';
-
-    // Group by day (YYYY-MM-DD)
     const byDay = {};
     expenses.forEach(e => {
       const d = e.dateAdded ? String(e.dateAdded).slice(0, 10) : 'unknown';
       (byDay[d] = byDay[d] || []).push(e);
     });
     const dayKeys = Object.keys(byDay).sort().reverse();
-
     dayKeys.forEach(dk => {
       const dayTotal = byDay[dk].reduce((sum, e) => sum + Number(e.amount || 0), 0);
       const dayEl = document.createElement('div');
       dayEl.className = 'day';
       dayEl.innerHTML = '<span>' + labelForDay(dk) + '</span><span class="tot">' + fmtAmount(dayTotal) + '</span>';
       feed.appendChild(dayEl);
-
       byDay[dk].forEach(e => {
         const cat = byId[e.subcategoryId] || byId[e.categoryId] || { name: '—', icon: '🏷️', colorKey: 'blue' };
         const exp = document.createElement('div');
         exp.className = 'exp';
         exp.innerHTML =
           '<div class="exp-icon c-' + (cat.colorKey || 'blue') + '">' + esc(cat.icon || '🏷️') + '</div>' +
-          '<div class="exp-body">' +
-            '<div class="exp-name">' + esc(e.name) + '</div>' +
-            '<div class="exp-cat">' + esc(cat.name) + '</div>' +
-          '</div>' +
+          '<div class="exp-body"><div class="exp-name">' + esc(e.name) + '</div>' +
+          '<div class="exp-cat">' + esc(cat.name) + '</div></div>' +
           '<div class="exp-amt">' + fmtAmount(e.amount) + '</div>';
         exp.onclick = () => openExpenseEditor(e);
         feed.appendChild(exp);
@@ -689,7 +570,6 @@ ScreenRenderers.home = function () {
     wrap.appendChild(feed);
   }
 
-  // Wire handlers after mount
   setTimeout(() => {
     const input = document.getElementById('qa-input');
     const btn = document.getElementById('qa-add');
@@ -710,86 +590,13 @@ ScreenRenderers.home = function () {
   return wrap;
 };
 
-// ---- Helpers used by the Home renderer ----
-
-// Returns { key, year, start, end, label, daysTotal, daysLeft } for
-// the period that contains today, given a start day-of-month.
-function computeCurrentPeriod(startDay) {
-  startDay = startDay || 25;
-  const now = new Date();
-  const todayDay = now.getDate();
-  const todayMonth = now.getMonth();
-  const todayYear = now.getFullYear();
-
-  let startYear, startMonth;
-  if (todayDay >= startDay) {
-    startYear = todayYear;
-    startMonth = todayMonth;
-  } else {
-    const prev = new Date(todayYear, todayMonth - 1, 1);
-    startYear = prev.getFullYear();
-    startMonth = prev.getMonth();
-  }
-
-  const startDate = clampDay(startYear, startMonth, startDay);
-  const endDate = new Date(startDate.getFullYear(), startDate.getMonth() + 1, startDate.getDate() - 1);
-
-  const key = pad2(startDate.getFullYear()) + '-' + pad2(startDate.getMonth() + 1);
-  const label = formatPeriodLabel(startDate, endDate);
-  const msPerDay = 86400000;
-  const daysTotal = Math.round((endDate - startDate) / msPerDay) + 1;
-  const todayMidnight = new Date(todayYear, todayMonth, todayDay);
-  const daysLeft = Math.max(0, Math.round((endDate - todayMidnight) / msPerDay));
-
-  return {
-    key, year: startDate.getFullYear(),
-    start: startDate.toISOString(), end: endDate.toISOString(),
-    label, daysTotal, daysLeft,
-  };
-}
-
-function clampDay(year, month0, day) {
-  const lastDay = new Date(year, month0 + 1, 0).getDate();
-  return new Date(year, month0, Math.min(day, lastDay));
-}
-function pad2(n) { return (n < 10 ? '0' : '') + n; }
-function formatPeriodLabel(start, end) {
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const sameYear = start.getFullYear() === end.getFullYear();
-  const s = start.getDate() + ' ' + months[start.getMonth()] + (sameYear ? '' : ' ' + start.getFullYear());
-  const e = end.getDate() + ' ' + months[end.getMonth()] + ' ' + end.getFullYear();
-  return s + ' – ' + e;
-}
-
-function labelForDay(iso) {
-  if (iso === 'unknown') return 'Unknown date';
-  const d = new Date(iso + 'T00:00:00');
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const diff = Math.round((today - d) / 86400000);
-  if (diff === 0) return 'Today · ' + d.getDate() + ' ' + monthShort(d);
-  if (diff === 1) return 'Yesterday · ' + d.getDate() + ' ' + monthShort(d);
-  return d.getDate() + ' ' + monthShort(d);
-}
-function monthShort(d) {
-  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
-}
-
 // ============================================================
 // 11. SCREEN — CATEGORIES
-// ------------------------------------------------------------
-// Shows: overall summary card (total spent with SEK on the right),
-// a vertical list of top-level categories, and a "＋ New" link.
-// Subcategories render as rows inside their parent card.
-//
-// Spend aggregation: each expense credits both its categoryId and
-// its subcategoryId, so a parent's spent includes its subs.
 // ============================================================
 ScreenRenderers.categories = function () {
   const s = App.settings || DEFAULT_SETTINGS;
   const period = computeCurrentPeriod(s.periodStartDay);
   const expenses = App.expenses.filter(e => e.periodKey === period.key);
-
   const categories = App.categories;
   const parents = categories.filter(c => !c.parentId);
   const childrenByParent = {};
@@ -810,7 +617,6 @@ ScreenRenderers.categories = function () {
 
   const wrap = document.createElement('div');
 
-  // Header
   const head = document.createElement('div');
   head.className = 'apphead';
   head.innerHTML =
@@ -819,7 +625,6 @@ ScreenRenderers.categories = function () {
     '<div class="avatar">' + (s.appName || 'OB').slice(0, 2).toUpperCase() + '</div>';
   wrap.appendChild(head);
 
-  // Overall card
   const overall = document.createElement('div');
   overall.className = 'overall';
   overall.innerHTML =
@@ -840,13 +645,11 @@ ScreenRenderers.categories = function () {
     '</div>';
   wrap.appendChild(overall);
 
-  // Section header
   const sh = document.createElement('div');
   sh.className = 'sechead';
   sh.innerHTML = '<h2>All categories</h2><a id="cat-new">＋ New</a>';
   wrap.appendChild(sh);
 
-  // Category cards
   if (!parents.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
@@ -871,10 +674,8 @@ ScreenRenderers.categories = function () {
           subs.map(sc => {
             const scSpent = spentByCat[sc.id] || 0;
             const scLimit = Number(sc.limit) || 0;
-            return '<div class="sub">' +
-              '<span class="n">' + esc(sc.name) + '</span>' +
-              '<span class="v">' + fmtAmount(scSpent) + ' <small>/ ' + fmtAmount(scLimit) + '</small></span>' +
-            '</div>';
+            return '<div class="sub"><span class="n">' + esc(sc.name) + '</span>' +
+              '<span class="v">' + fmtAmount(scSpent) + ' <small>/ ' + fmtAmount(scLimit) + '</small></span></div>';
           }).join('') +
         '</div>';
       }
@@ -888,9 +689,7 @@ ScreenRenderers.categories = function () {
           '</div>' +
           '<div class="cat-bar"><div style="width:' + pctClamped + '%"></div></div>' +
           '<div class="cat-foot">' +
-            '<span class="cat-left">' +
-              (over ? '−' + fmtAmount(-left) + ' over' : fmtAmount(left) + ' left') +
-            '</span>' +
+            '<span class="cat-left">' + (over ? '−' + fmtAmount(-left) + ' over' : fmtAmount(left) + ' left') + '</span>' +
             '<span class="cat-pct">' + pct + '%</span>' +
           '</div>' +
           subsHtml +
@@ -909,136 +708,8 @@ ScreenRenderers.categories = function () {
   return wrap;
 };
 
-// ---- Editor: Add / Edit Category ----
-function openCategoryEditor(cat) {
-  const isNew = !cat;
-  const editing = cat
-    ? Object.assign({}, cat)
-    : { name: '', icon: '🏷️', limit: 0, colorKey: 'blue', parentId: '', pinOrder: 0 };
-
-  openSheet((body) => {
-    body.appendChild(h('h3', null, isNew ? 'New category' : 'Edit category'));
-
-    // Name
-    const nameF = h('div', { class: 'field' });
-    nameF.innerHTML = '<label>Name</label><input id="ce-name" value="' + esc(editing.name) + '">';
-    body.appendChild(nameF);
-
-    // Limit
-    const limF = h('div', { class: 'field' });
-    limF.innerHTML = '<label>Limit</label><input id="ce-limit" inputmode="numeric" value="' + (editing.limit || 0) + '">';
-    body.appendChild(limF);
-
-    // Icon
-    const iconF = h('div', { class: 'field' });
-    iconF.innerHTML = '<label>Icon</label><input id="ce-icon" value="' + esc(editing.icon || '🏷️') + '" maxlength="4" style="width:60px;text-align:right;">';
-    body.appendChild(iconF);
-
-    // Color
-    const colorF = h('div', { class: 'field c-' + editing.colorKey });
-    colorF.style.cursor = 'pointer';
-    colorF.innerHTML =
-      '<label>Color</label>' +
-      '<div style="display:flex;align-items:center;gap:10px">' +
-        '<div id="ce-swatch" style="width:22px;height:22px;border-radius:11px;background:var(--cat);' +
-          'box-shadow:inset 0 0 0 2px rgba(255,255,255,.7),0 1px 3px rgba(0,0,0,.12)"></div>' +
-        '<span style="color:var(--text3)">›</span>' +
-      '</div>';
-    colorF.onclick = () => {
-      openColorPicker(editing.colorKey, (newKey) => {
-        editing.colorKey = newKey;
-        colorF.className = 'field c-' + newKey;
-        const sw = document.getElementById('ce-swatch');
-        if (sw) sw.style.background = 'var(--cat)';
-      });
-    };
-    body.appendChild(colorF);
-
-    // Pin toggle
-    const pinF = h('div', { class: 'field' });
-    pinF.style.cursor = 'pointer';
-    pinF.innerHTML =
-      '<label>Pin to Home</label>' +
-      '<div id="ce-pin" style="width:44px;height:26px;border-radius:13px;' +
-        'background:' + (editing.pinOrder > 0 ? '#34c759' : 'var(--track)') + ';' +
-        'position:relative;transition:background .2s">' +
-        '<div style="position:absolute;top:2px;' +
-          (editing.pinOrder > 0 ? 'right:2px' : 'left:2px') + ';' +
-          'width:22px;height:22px;border-radius:11px;background:#fff;' +
-          'box-shadow:0 1px 2px rgba(0,0,0,.2)"></div>' +
-      '</div>';
-    pinF.onclick = () => {
-      const newPin = editing.pinOrder > 0 ? 0 : 99;
-      if (newPin) {
-        const pinnedCount = App.categories.filter(c => Number(c.pinOrder) > 0).length;
-        if (pinnedCount >= 3) { toast('Pin cap reached (3)'); return; }
-      }
-      editing.pinOrder = newPin;
-      const t = document.getElementById('ce-pin');
-      t.style.background = newPin ? '#34c759' : 'var(--track)';
-      t.firstElementChild.style.left = newPin ? 'auto' : '2px';
-      t.firstElementChild.style.right = newPin ? '2px' : 'auto';
-    };
-    body.appendChild(pinF);
-
-    // Parent (new only)
-    if (isNew) {
-      const parentF = h('div', { class: 'field' });
-      const parentOpts = ['<option value="">— None (top-level) —</option>']
-        .concat(App.categories.filter(c => !c.parentId).map(c =>
-          '<option value="' + c.id + '">' + esc(c.name) + '</option>'
-        )).join('');
-      parentF.innerHTML =
-        '<label>Parent</label>' +
-        '<select id="ce-parent" style="flex:1;background:transparent;border:none;' +
-          'outline:none;text-align:right;font-family:inherit;font-size:15px;' +
-          'font-weight:600;color:var(--text)">' + parentOpts + '</select>';
-      body.appendChild(parentF);
-    }
-
-    // Save
-    const saveBtn = h('button', { class: 'primary' }, isNew ? 'Create' : 'Save');
-    saveBtn.onclick = async () => {
-      const name = document.getElementById('ce-name').value.trim();
-      if (!name) { toast('Name required'); return; }
-      const limit = Number(document.getElementById('ce-limit').value) || 0;
-      const icon = document.getElementById('ce-icon').value.trim() || '🏷️';
-      const parentEl = document.getElementById('ce-parent');
-      const parentId = isNew ? (parentEl ? parentEl.value : '') : (cat.parentId || '');
-      const wantPin = editing.pinOrder > 0;
-      closeSheet();
-
-      const data = {
-        name, limit, icon, colorKey: editing.colorKey,
-        parentId, pinOrder: wantPin ? (editing.pinOrder || 99) : 0,
-      };
-
-      if (isNew) {
-        await FB.addDoc(categoriesCol(), { ...data, createdAt: new Date().toISOString() });
-      } else {
-        await FB.updateDoc(FB.doc(categoriesCol(), cat.id), data);
-      }
-    };
-    body.appendChild(saveBtn);
-
-    // Delete (edit only)
-    if (!isNew) {
-      const del = h('button', { class: 'danger' }, 'Delete');
-      del.onclick = async () => {
-        if (!confirm('Delete "' + cat.name + '"? Historical expenses keep their name.')) return;
-        closeSheet();
-        await FB.deleteDoc(FB.doc(categoriesCol(), cat.id));
-      };
-      body.appendChild(del);
-    }
-  });
-}
-
 // ============================================================
-// 12. SCREEN — BUY (shopping list)
-// ------------------------------------------------------------
-// Simple checklist. Checked items fade and move to the bottom.
-// Long-press opens a rename/delete menu.
+// 12. SCREEN — BUY
 // ============================================================
 ScreenRenderers.buy = function () {
   const s = App.settings || DEFAULT_SETTINGS;
@@ -1071,18 +742,15 @@ ScreenRenderers.buy = function () {
   } else {
     const list = document.createElement('div');
     list.className = 'buy-list';
-
     items.forEach(item => {
       const row = document.createElement('div');
       row.className = 'gitem' + (item.checked ? ' paid' : '');
       row.innerHTML =
         '<div class="gcheck' + (item.checked ? ' on' : '') + '">' + (item.checked ? '✓' : '') + '</div>' +
         '<div class="gname">' + esc(item.name) + '</div>';
-
       const chk = row.querySelector('.gcheck');
       chk.onclick = (ev) => { ev.stopPropagation(); toggleBuy(item); };
 
-      // Long-press for rename/delete
       let t = null;
       const start = () => { t = setTimeout(() => buyItemMenu(item), 600); };
       const stop = () => { if (t) { clearTimeout(t); t = null; } };
@@ -1121,21 +789,15 @@ ScreenRenderers.buy = function () {
       addBtn.onclick = add;
       inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') add(); });
     }
-
     const clearChecked = document.getElementById('buy-clear-checked');
     if (clearChecked) clearChecked.onclick = async () => {
       const checked = App.buy.filter(x => x.checked);
-      for (const x of checked) {
-        await FB.deleteDoc(FB.doc(buyCol(), x.id));
-      }
+      for (const x of checked) await FB.deleteDoc(FB.doc(buyCol(), x.id));
     };
-
     const clearAll = document.getElementById('buy-clear-all');
     if (clearAll) clearAll.onclick = async () => {
       if (!confirm('Clear the entire list?')) return;
-      for (const x of App.buy.slice()) {
-        await FB.deleteDoc(FB.doc(buyCol(), x.id));
-      }
+      for (const x of App.buy.slice()) await FB.deleteDoc(FB.doc(buyCol(), x.id));
     };
   }, 0);
 
@@ -1152,7 +814,6 @@ function toggleBuy(item) {
 function buyItemMenu(item) {
   openSheet((body) => {
     body.appendChild(h('h3', null, item.name));
-
     const editBtn = h('button', { class: 'primary' }, 'Rename');
     editBtn.onclick = async () => {
       const v = prompt('New name:', item.name);
@@ -1163,7 +824,6 @@ function buyItemMenu(item) {
       await FB.updateDoc(FB.doc(buyCol(), item.id), { name: trimmed });
     };
     body.appendChild(editBtn);
-
     const del = h('button', { class: 'danger' }, 'Delete');
     del.onclick = async () => {
       closeSheet();
@@ -1175,10 +835,6 @@ function buyItemMenu(item) {
 
 // ============================================================
 // 13. SCREEN — TO PAY
-// ------------------------------------------------------------
-// Single list, sorted due-soon → no-date → paid. Subscriptions
-// show a "SUB" pill. A "1 day" red pill appears on unpaid items
-// due tomorrow.
 // ============================================================
 ScreenRenderers.topay = function () {
   const items = App.toPay.slice();
@@ -1229,31 +885,19 @@ ScreenRenderers.topay = function () {
   } else {
     const list = document.createElement('div');
     list.className = 'pay-list';
-
     items.forEach(item => {
       const d = item.dueDate ? daysUntil(item.dueDate) : null;
       let metaTxt = '', metaCls = 'pmeta';
-      if (item.paid) {
-        metaTxt = 'Paid ' + fmtDateShort(item.paidDate);
-        metaCls = 'pmeta done';
-      } else if (d === null) {
-        metaTxt = 'No due date';
-      } else if (d < 0) {
-        metaTxt = 'Overdue by ' + (-d) + ' day' + (d === -1 ? '' : 's');
-        metaCls = 'pmeta due';
-      } else if (d === 0) {
-        metaTxt = 'Due today'; metaCls = 'pmeta due';
-      } else if (d === 1) {
-        metaTxt = 'Due tomorrow'; metaCls = 'pmeta due';
-      } else {
-        metaTxt = 'Due ' + fmtDateShort(item.dueDate) + ' · ' + d + ' days';
-        metaCls = 'pmeta due';
-      }
+      if (item.paid) { metaTxt = 'Paid ' + fmtDateShort(item.paidDate); metaCls = 'pmeta done'; }
+      else if (d === null) { metaTxt = 'No due date'; }
+      else if (d < 0) { metaTxt = 'Overdue by ' + (-d) + ' day' + (d === -1 ? '' : 's'); metaCls = 'pmeta due'; }
+      else if (d === 0) { metaTxt = 'Due today'; metaCls = 'pmeta due'; }
+      else if (d === 1) { metaTxt = 'Due tomorrow'; metaCls = 'pmeta due'; }
+      else { metaTxt = 'Due ' + fmtDateShort(item.dueDate) + ' · ' + d + ' days'; metaCls = 'pmeta due'; }
 
       const amountHtml = item.amount == null
         ? '<div class="pamt" style="color:var(--text3);font-size:13px">—</div>'
         : '<div class="pamt">' + fmtAmount(item.amount) + '</div>';
-
       const pill = (d === 1 && !item.paid) ? '<div class="pill-day">1 day</div>' : '';
       const subTag = item.isSubscription ? '<span class="pill-sub">SUB</span>' : '';
 
@@ -1264,15 +908,13 @@ ScreenRenderers.topay = function () {
         '<div class="pbody">' +
           '<div class="pname">' + esc(item.name) + ' ' + subTag + '</div>' +
           '<div class="' + metaCls + '">' + esc(metaTxt) + '</div>' +
-        '</div>' +
-        pill + amountHtml;
+        '</div>' + pill + amountHtml;
 
       const chk = row.querySelector('.pcheck');
       chk.onclick = (ev) => { ev.stopPropagation(); togglePaid(item); };
       row.onclick = () => openToPayEditor(item);
       list.appendChild(row);
     });
-
     wrap.appendChild(list);
   }
 
@@ -1307,7 +949,6 @@ function togglePaid(item) {
   });
 }
 
-// ---- Editor: Add / Edit To Pay item ----
 function openToPayEditor(item, prefillName) {
   const isNew = !item;
   if (!item) {
@@ -1321,23 +962,19 @@ function openToPayEditor(item, prefillName) {
   openSheet((body) => {
     body.appendChild(h('h3', null, isNew ? 'New item' : 'Edit item'));
 
-    // Name
     const nameF = h('div', { class: 'field' });
     nameF.innerHTML = '<label>Name</label><input id="tp-name" value="' + esc(item.name) + '">';
     body.appendChild(nameF);
 
-    // Amount (optional)
     const amtF = h('div', { class: 'field' });
     amtF.innerHTML = '<label>Amount</label><input id="tp-amt" inputmode="numeric" value="' +
       (item.amount != null ? item.amount : '') + '" placeholder="Optional">';
     body.appendChild(amtF);
 
-    // Due date
     const dueF = h('div', { class: 'field' });
     dueF.innerHTML = '<label>Due date</label><input id="tp-due" type="date" value="' + (item.dueDate || '') + '">';
     body.appendChild(dueF);
 
-    // Subscription toggle
     const subF = document.createElement('div');
     subF.className = 'field';
     subF.style.cursor = 'pointer';
@@ -1352,11 +989,9 @@ function openToPayEditor(item, prefillName) {
       '<div id="tp-sub-toggle" style="width:44px;height:26px;border-radius:13px;' +
         'background:' + (subState ? '#34c759' : 'var(--track)') + ';' +
         'position:relative;transition:background .2s;flex-shrink:0">' +
-        '<div style="position:absolute;top:2px;' +
-          (subState ? 'right:2px' : 'left:2px') + ';' +
+        '<div style="position:absolute;top:2px;' + (subState ? 'right:2px' : 'left:2px') + ';' +
           'width:22px;height:22px;border-radius:11px;background:#fff;' +
-          'box-shadow:0 1px 2px rgba(0,0,0,.2);' +
-          'transition:left .2s,right .2s"></div>' +
+          'box-shadow:0 1px 2px rgba(0,0,0,.2);transition:left .2s,right .2s"></div>' +
       '</div>';
     subF.onclick = () => {
       subState = !subState;
@@ -1369,71 +1004,6 @@ function openToPayEditor(item, prefillName) {
     };
     body.appendChild(subF);
 
-    // Reminders
-    body.appendChild(h('div', {
-      style: 'font-size:11px;color:var(--text2);font-weight:700;' +
-        'text-transform:uppercase;letter-spacing:.5px;margin:14px 4px 6px;'
-    }, 'Reminders'));
-
-    const rwF = h('div', { class: 'field' });
-    rwF.innerHTML =
-      '<label>Remind with</label>' +
-      '<select id="tp-rw" style="flex:1;background:transparent;border:none;' +
-        'outline:none;text-align:right;font-family:inherit;font-size:15px;' +
-        'font-weight:600;color:var(--text)">' +
-        '<option value="off"' + (item.remindWith === 'off' ? ' selected' : '') + '>Off</option>' +
-        '<option value="email"' + (item.remindWith === 'email' ? ' selected' : '') + '>Email</option>' +
-        '<option value="calendar"' + (item.remindWith === 'calendar' ? ' selected' : '') + '>Calendar</option>' +
-        '<option value="both"' + (item.remindWith === 'both' ? ' selected' : '') + '>Email + Calendar</option>' +
-      '</select>';
-    body.appendChild(rwF);
-
-    const emailF = h('div', { class: 'field' });
-    emailF.innerHTML = '<label>Email to</label><input id="tp-email" type="email" value="' + esc(item.emailTo || '') + '" placeholder="Optional">';
-    body.appendChild(emailF);
-
-    body.appendChild(h('div', {
-      style: 'font-size:11px;color:var(--text2);font-weight:700;' +
-        'text-transform:uppercase;letter-spacing:.5px;margin:14px 4px 6px;'
-    }, 'Remind me'));
-
-    const rulesWrap = document.createElement('div');
-    body.appendChild(rulesWrap);
-    let rules = (item.reminderRules || []).slice();
-
-    function renderRules() {
-      rulesWrap.innerHTML = '';
-      rules.sort((a, b) => a.daysOffset - b.daysOffset);
-      rules.forEach((rule, idx) => {
-        const row = document.createElement('div');
-        row.className = 'field';
-        const label = rule.daysOffset === 0 ? 'On due date'
-          : rule.daysOffset > 0 ? rule.daysOffset + ' day' + (rule.daysOffset === 1 ? '' : 's') + ' before'
-          : (-rule.daysOffset) + ' day' + (rule.daysOffset === -1 ? '' : 's') + ' after';
-        row.innerHTML = '<label>' + label + '</label><span style="color:var(--red);font-weight:800;cursor:pointer">✕</span>';
-        row.querySelector('span').onclick = () => { rules.splice(idx, 1); renderRules(); };
-        rulesWrap.appendChild(row);
-      });
-      const addBtn = document.createElement('button');
-      addBtn.className = 'primary';
-      addBtn.style.background = 'var(--blue-soft)';
-      addBtn.style.color = 'var(--blue)';
-      addBtn.style.marginTop = '6px';
-      addBtn.textContent = '+ Add reminder';
-      addBtn.onclick = () => {
-        const val = prompt('Days before due (positive) or after (negative):', '1');
-        if (val === null) return;
-        const n = parseInt(val, 10);
-        if (isNaN(n) || n < -30 || n > 60) return;
-        if (rules.some(r => r.daysOffset === n)) return;
-        rules.push({ daysOffset: n });
-        renderRules();
-      };
-      rulesWrap.appendChild(addBtn);
-    }
-    renderRules();
-
-    // Save
     const saveBtn = h('button', { class: 'primary' }, isNew ? 'Add' : 'Save');
     saveBtn.onclick = async () => {
       const name = document.getElementById('tp-name').value.trim();
@@ -1445,13 +1015,9 @@ function openToPayEditor(item, prefillName) {
       if (subState && !due) { toast('Subscriptions need a due date'); return; }
 
       const data = {
-        name, amount, dueDate: due,
-        isSubscription: subState,
-        remindWith: document.getElementById('tp-rw').value,
-        emailTo: document.getElementById('tp-email').value.trim(),
-        reminderRules: rules,
+        name, amount, dueDate: due, isSubscription: subState,
+        remindWith: 'off', emailTo: '', reminderRules: [],
       };
-
       closeSheet();
       if (isNew) {
         await FB.addDoc(toPayCol(), {
@@ -1464,7 +1030,6 @@ function openToPayEditor(item, prefillName) {
     };
     body.appendChild(saveBtn);
 
-    // Delete
     if (!isNew) {
       const del = h('button', { class: 'danger' }, 'Delete');
       del.onclick = async () => {
@@ -1479,33 +1044,17 @@ function openToPayEditor(item, prefillName) {
 
 // ============================================================
 // 14. SCREEN — HISTORY
-// ------------------------------------------------------------
-// Year picker at top, then a vertical list of period cards. Each
-// card shows the budget snapshot, spent total, and status.
-//
-// Where the data comes from: the /budgets/shared/history
-// collection. Each document is keyed by periodKey ('YYYY-MM' of
-// the period's start month) and holds a frozen budgetSnapshot
-// plus a computed totalSpent.
-//
-// Rows are created automatically the first time an expense is
-// added in a new period (see ensureHistoryRow call inside
-// addExpenseFlow).
 // ============================================================
 ScreenRenderers.history = function () {
   const s = App.settings || DEFAULT_SETTINGS;
-
-  // Default year = current period's start year.
   const period = computeCurrentPeriod(s.periodStartDay);
   if (!App.historyYear) App.historyYear = String(period.year);
   const currentYear = App.historyYear;
 
-  // Years available, derived from stored history rows.
   const years = Array.from(new Set(App.history.map(h => String(h.periodKey).slice(0, 4)))).sort();
   if (!years.includes(currentYear)) years.push(currentYear);
   years.sort();
 
-  // Filter to the active year and sort newest first.
   const rows = App.history
     .filter(h => String(h.periodKey).slice(0, 4) === currentYear)
     .sort((a, b) => b.periodKey.localeCompare(a.periodKey));
@@ -1575,12 +1124,6 @@ ScreenRenderers.history = function () {
 
 // ============================================================
 // 15. SCREEN — SETTINGS
-// ------------------------------------------------------------
-// General (app name, currency, total budget, timezone)
-// Reset (period start day, To Pay reset day)
-// Appearance (theme, hero tone)
-// Categories (shortcut list to edit each category)
-// Data (sign out)
 // ============================================================
 ScreenRenderers.settings = function () {
   const s = App.settings || DEFAULT_SETTINGS;
@@ -1596,32 +1139,19 @@ ScreenRenderers.settings = function () {
     '<div class="avatar">' + (s.appName || 'OB').slice(0, 2).toUpperCase() + '</div>';
   wrap.appendChild(head);
 
-  // --- General ---
   wrap.appendChild(sectionTitle('General'));
   const g = group();
   g.appendChild(rowInput('App name', 'set-appname', s.appName || ''));
   g.appendChild(rowInput('Currency', 'set-currency', s.currency || 'SEK'));
   g.appendChild(rowInput('Total budget', 'set-budget', s.totalBudget || 0));
-  g.appendChild(rowVal('Timezone', s.timezone, () => pickTimezone()));
   wrap.appendChild(g);
 
-  // --- Reset ---
   wrap.appendChild(sectionTitle('Reset'));
   const reset = group();
   reset.appendChild(rowInput('Period start day', 'set-startday', s.periodStartDay || 25));
-  reset.appendChild(rowVal(
-    'To Pay reset day',
-    s.toPayResetDay === 'last' ? 'Last day' : String(s.toPayResetDay || 'last'),
-    () => pickToPayResetDay()
-  ));
   wrap.appendChild(reset);
-  wrap.appendChild(hint(
-    'Period start day: the day of the month your budget period begins. ' +
-    'It also determines which expenses show on Home. ' +
-    'To Pay reset day: when subscriptions roll forward and normal payments are deleted.'
-  ));
+  wrap.appendChild(hint('Period start day determines when your budget period begins.'));
 
-  // --- Appearance ---
   wrap.appendChild(sectionTitle('Appearance'));
   const appear = group();
 
@@ -1649,7 +1179,6 @@ ScreenRenderers.settings = function () {
   appear.appendChild(toneRow);
   wrap.appendChild(appear);
 
-  // --- Categories ---
   wrap.appendChild(sectionTitle('Categories', parents.length + ' of unlimited'));
   const cats = group();
   parents.forEach(c => {
@@ -1667,7 +1196,6 @@ ScreenRenderers.settings = function () {
   cats.appendChild(addCat);
   wrap.appendChild(cats);
 
-  // --- Account ---
   wrap.appendChild(sectionTitle('Account'));
   const acct = group();
   acct.appendChild(rowVal('Signed in as', App.user?.email || '—', null));
@@ -1680,7 +1208,6 @@ ScreenRenderers.settings = function () {
   acct.appendChild(signOutBtn);
   wrap.appendChild(acct);
 
-  // Wire inputs after mount
   setTimeout(() => {
     bindInput('set-appname', v => saveSetting('appName', v));
     bindInput('set-currency', v => saveSetting('currency', v));
@@ -1694,7 +1221,6 @@ ScreenRenderers.settings = function () {
   return wrap;
 };
 
-// ---- Settings helpers ----
 function sectionTitle(text, count) {
   const el = document.createElement('div');
   el.className = 'secttl';
@@ -1724,18 +1250,11 @@ function bindInput(id, onCommit) {
   el.addEventListener('blur', () => onCommit(el.value));
   el.addEventListener('keydown', ev => { if (ev.key === 'Enter') el.blur(); });
 }
-
-// Save a single setting to Firestore. Server-side re-validation
-// will normalize anything out of range (e.g. day of month > 31
-// gets clamped by the write handler in the settings listener).
 function saveSetting(key, value) {
   FB.updateDoc(budgetDoc(), { [key]: value });
 }
-
 function changeTheme(theme) {
   saveSetting('theme', theme);
-  // Apply immediately for visual feedback (the Firestore listener
-  // will also fire, but this feels instant).
   if (theme === 'system') {
     document.body.setAttribute('data-theme',
       window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -1745,60 +1264,198 @@ function changeTheme(theme) {
   renderScreen('settings');
 }
 
-function pickTimezone() {
-  openSheet(body => {
-    body.appendChild(h('h3', null, 'Timezone'));
-    const zones = [
-      'Europe/Stockholm','Europe/London','Europe/Berlin','Europe/Paris','Europe/Madrid',
-      'Europe/Rome','Europe/Amsterdam','Europe/Oslo','Europe/Copenhagen','Europe/Helsinki',
-      'Europe/Warsaw','Europe/Prague','Europe/Vienna','Europe/Zurich','Europe/Brussels',
-      'America/New_York','America/Los_Angeles','America/Chicago','America/Toronto',
-      'Asia/Tokyo','Asia/Singapore','Asia/Dubai','Australia/Sydney','UTC',
-    ];
-    zones.forEach(z => {
-      const r = document.createElement('div');
-      r.className = 'field';
-      r.style.cursor = 'pointer';
-      r.innerHTML =
-        '<label style="color:var(--text);font-weight:500">' + z + '</label>' +
-        (App.settings.timezone === z ? '<span style="color:var(--blue);font-weight:800">✓</span>' : '');
-      r.onclick = () => {
-        saveSetting('timezone', z);
-        closeSheet();
-        renderScreen('settings');
-      };
-      body.appendChild(r);
-    });
-  });
-}
+// ============================================================
+// 16. CATEGORY EDITOR
+// ============================================================
+function openCategoryEditor(cat) {
+  const isNew = !cat;
+  const editing = cat
+    ? Object.assign({}, cat)
+    : { name: '', icon: '🏷️', limit: 0, colorKey: 'blue', parentId: '', pinOrder: 0 };
 
-function pickToPayResetDay() {
-  openSheet(body => {
-    body.appendChild(h('h3', null, 'To Pay reset day'));
-    const opts = [{ v: 'last', l: 'Last day of month' }];
-    for (let i = 1; i <= 28; i++) opts.push({ v: String(i), l: 'Day ' + i });
+  openSheet((body) => {
+    body.appendChild(h('h3', null, isNew ? 'New category' : 'Edit category'));
 
-    opts.forEach(o => {
-      const r = document.createElement('div');
-      r.className = 'field';
-      r.style.cursor = 'pointer';
-      r.innerHTML =
-        '<label style="color:var(--text);font-weight:500">' + o.l + '</label>' +
-        (String(App.settings.toPayResetDay) === o.v ? '<span style="color:var(--blue);font-weight:800">✓</span>' : '');
-      r.onclick = () => {
-        saveSetting('toPayResetDay', o.v);
+    const nameF = h('div', { class: 'field' });
+    nameF.innerHTML = '<label>Name</label><input id="ce-name" value="' + esc(editing.name) + '">';
+    body.appendChild(nameF);
+
+    const limF = h('div', { class: 'field' });
+    limF.innerHTML = '<label>Limit</label><input id="ce-limit" inputmode="numeric" value="' + (editing.limit || 0) + '">';
+    body.appendChild(limF);
+
+    const iconF = h('div', { class: 'field' });
+    iconF.innerHTML = '<label>Icon</label><input id="ce-icon" value="' + esc(editing.icon || '🏷️') + '" maxlength="4" style="width:60px;text-align:right;">';
+    body.appendChild(iconF);
+
+    const colorF = h('div', { class: 'field c-' + editing.colorKey });
+    colorF.style.cursor = 'pointer';
+    colorF.innerHTML =
+      '<label>Color</label>' +
+      '<div style="display:flex;align-items:center;gap:10px">' +
+        '<div id="ce-swatch" style="width:22px;height:22px;border-radius:11px;background:var(--cat);' +
+          'box-shadow:inset 0 0 0 2px rgba(255,255,255,.7),0 1px 3px rgba(0,0,0,.12)"></div>' +
+        '<span style="color:var(--text3)">›</span>' +
+      '</div>';
+    colorF.onclick = () => {
+      openColorPicker(editing.colorKey, (newKey) => {
+        editing.colorKey = newKey;
+        colorF.className = 'field c-' + newKey;
+        const sw = document.getElementById('ce-swatch');
+        if (sw) sw.style.background = 'var(--cat)';
+      });
+    };
+    body.appendChild(colorF);
+
+    const saveBtn = h('button', { class: 'primary' }, isNew ? 'Create' : 'Save');
+    saveBtn.onclick = async () => {
+      const name = document.getElementById('ce-name').value.trim();
+      if (!name) { toast('Name required'); return; }
+      const limit = Number(document.getElementById('ce-limit').value) || 0;
+      const icon = document.getElementById('ce-icon').value.trim() || '🏷️';
+      closeSheet();
+      const data = { name, limit, icon, colorKey: editing.colorKey, parentId: editing.parentId || '', pinOrder: editing.pinOrder || 0 };
+      if (isNew) {
+        await FB.addDoc(categoriesCol(), { ...data, createdAt: new Date().toISOString() });
+      } else {
+        await FB.updateDoc(FB.doc(categoriesCol(), cat.id), data);
+      }
+    };
+    body.appendChild(saveBtn);
+
+    if (!isNew) {
+      const del = h('button', { class: 'danger' }, 'Delete');
+      del.onclick = async () => {
+        if (!confirm('Delete "' + cat.name + '"? Historical expenses keep their name.')) return;
         closeSheet();
-        renderScreen('settings');
+        await FB.deleteDoc(FB.doc(categoriesCol(), cat.id));
       };
-      body.appendChild(r);
-    });
+      body.appendChild(del);
+    }
   });
 }
 
 // ============================================================
-// 16. COLOR PICKER (50 colors)
-// ------------------------------------------------------------
-// The palette keys must match the c-<key> classes in style.css.
+// 17. EXPENSE EDITOR
+// ============================================================
+function openExpenseEditor(expense, prefillName) {
+  const isNew = !expense;
+  const working = expense
+    ? Object.assign({}, expense)
+    : { name: prefillName || '', amount: 0, categoryId: '', subcategoryId: '' };
+
+  openSheet(body => {
+    body.appendChild(h('h3', null, isNew ? 'Add expense' : 'Edit expense'));
+
+    const nameF = h('div', { class: 'field' });
+    nameF.innerHTML = '<label>Name</label><input id="exp-name" value="' + esc(working.name) + '">';
+    body.appendChild(nameF);
+
+    const amtF = h('div', { class: 'field' });
+    amtF.innerHTML = '<label>Amount</label><input id="exp-amt" inputmode="numeric" value="' +
+      (working.amount || '') + '" placeholder="0">';
+    body.appendChild(amtF);
+
+    body.appendChild(h('div', {
+      style: 'font-size:11px;color:var(--text2);font-weight:700;' +
+        'text-transform:uppercase;letter-spacing:.5px;margin:14px 4px 8px;'
+    }, 'Category'));
+
+    const parents = App.categories.filter(c => !c.parentId);
+    let chosenCat = working.categoryId || (parents[0] ? parents[0].id : null);
+
+    parents.forEach(c => {
+      const row = document.createElement('div');
+      row.className = 'field';
+      row.style.cursor = 'pointer';
+      row.innerHTML =
+        '<div style="display:flex;align-items:center;gap:10px;flex:1">' +
+          '<div class="cat-icon c-' + (c.colorKey || 'blue') + '" ' +
+            'style="width:30px;height:30px;border-radius:10px;font-size:14px;' +
+              'display:flex;align-items:center;justify-content:center">' +
+            esc(c.icon || '🏷️') +
+          '</div>' +
+          '<span style="font-weight:600">' + esc(c.name) + '</span>' +
+        '</div>' +
+        '<span class="cat-check" style="color:var(--blue);font-weight:800;opacity:' +
+          (chosenCat === c.id ? '1' : '0') + '">✓</span>';
+      row.onclick = () => {
+        chosenCat = c.id;
+        body.querySelectorAll('.cat-check').forEach(el => el.style.opacity = '0');
+        row.querySelector('.cat-check').style.opacity = '1';
+      };
+      body.appendChild(row);
+    });
+
+    const saveBtn = h('button', { class: 'primary' }, isNew ? 'Add expense' : 'Save');
+    saveBtn.onclick = async () => {
+      const name = document.getElementById('exp-name').value.trim();
+      const amount = Number(document.getElementById('exp-amt').value);
+      if (!name) { toast('Name required'); return; }
+      if (!amount || amount <= 0) { toast('Amount must be > 0'); return; }
+      if (!chosenCat) { toast('Pick a category'); return; }
+      closeSheet();
+
+      if (isNew) {
+        const periodKey = computeCurrentPeriod(App.settings.periodStartDay).key;
+        const now = new Date().toISOString();
+        await FB.addDoc(expensesCol(), {
+          name, amount, categoryId: chosenCat, subcategoryId: '',
+          dateAdded: now, periodKey,
+        });
+        await ensureHistoryRowForCurrentPeriod();
+      } else {
+        await FB.updateDoc(FB.doc(expensesCol(), expense.id), { name, amount, categoryId: chosenCat });
+        await recomputeHistoryTotal(expense.periodKey);
+      }
+    };
+    body.appendChild(saveBtn);
+
+    if (!isNew) {
+      const del = h('button', { class: 'danger' }, 'Delete');
+      del.onclick = async () => {
+        if (!confirm('Delete "' + expense.name + '"?')) return;
+        closeSheet();
+        await FB.deleteDoc(FB.doc(expensesCol(), expense.id));
+        await recomputeHistoryTotal(expense.periodKey);
+      };
+      body.appendChild(del);
+    }
+  });
+}
+
+// ============================================================
+// 18. HISTORY MAINTENANCE
+// ============================================================
+async function ensureHistoryRowForCurrentPeriod() {
+  const period = computeCurrentPeriod(App.settings.periodStartDay);
+  const docRef = FB.doc(historyCol(), period.key);
+  const snap = await FB.getDoc(docRef);
+  if (!snap.exists()) {
+    await FB.setDoc(docRef, {
+      periodKey: period.key,
+      periodLabel: period.label,
+      budgetSnapshot: Number(App.settings.totalBudget) || 0,
+      totalSpent: 0,
+    });
+  }
+  await recomputeHistoryTotal(period.key);
+}
+
+async function recomputeHistoryTotal(periodKey) {
+  if (!periodKey) return;
+  const total = App.expenses
+    .filter(e => e.periodKey === periodKey)
+    .reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  const docRef = FB.doc(historyCol(), periodKey);
+  const snap = await FB.getDoc(docRef);
+  if (snap.exists()) {
+    await FB.updateDoc(docRef, { totalSpent: total });
+  }
+}
+
+// ============================================================
+// 19. COLOR PICKER (50 colors)
 // ============================================================
 const PALETTE = [
   'blue','sky','azure','teal','mint','cyan','ocean','indigo','violet','lavender',
@@ -1824,11 +1481,7 @@ function openColorPicker(currentKey, onPick) {
 }
 
 // ============================================================
-// 17. TONE PICKER (15 tones)
-// ------------------------------------------------------------
-// Each tone's key must match a [data-tone="..."] rule in
-// style.css. The gradient is rendered inline on the tile so the
-// user sees exactly what the hero will look like.
+// 20. TONE PICKER (15 tones)
 // ============================================================
 const TONES = [
   { key: 'forest',   name: 'Forest',   a: '#1b4332', b: '#40916c' },
@@ -1870,151 +1523,64 @@ function openTonePicker(currentKey) {
 }
 
 // ============================================================
-// 18. EXPENSE EDITOR
-// ------------------------------------------------------------
-// Two entry points:
-//   openExpenseEditor(null, prefillName) → add new
-//   openExpenseEditor(expense)           → edit existing
+// 21. PERIOD HELPERS
 // ============================================================
-function openExpenseEditor(expense, prefillName) {
-  const isNew = !expense;
-  const working = expense
-    ? Object.assign({}, expense)
-    : { name: prefillName || '', amount: 0, categoryId: '', subcategoryId: '' };
+function computeCurrentPeriod(startDay) {
+  startDay = startDay || 25;
+  const now = new Date();
+  const todayDay = now.getDate();
+  const todayMonth = now.getMonth();
+  const todayYear = now.getFullYear();
 
-  openSheet(body => {
-    body.appendChild(h('h3', null, isNew ? 'Add expense' : 'Edit expense'));
-
-    // Name
-    const nameF = h('div', { class: 'field' });
-    nameF.innerHTML = '<label>Name</label><input id="exp-name" value="' + esc(working.name) + '">';
-    body.appendChild(nameF);
-
-    // Amount
-    const amtF = h('div', { class: 'field' });
-    amtF.innerHTML = '<label>Amount</label><input id="exp-amt" inputmode="numeric" value="' +
-      (working.amount || '') + '" placeholder="0">';
-    body.appendChild(amtF);
-
-    // Category picker (top-level parents only for simplicity)
-    body.appendChild(h('div', {
-      style: 'font-size:11px;color:var(--text2);font-weight:700;' +
-        'text-transform:uppercase;letter-spacing:.5px;margin:14px 4px 8px;'
-    }, 'Category'));
-
-    const parents = App.categories.filter(c => !c.parentId);
-    let chosenCat = working.categoryId || (parents[0] ? parents[0].id : null);
-
-    parents.forEach(c => {
-      const row = document.createElement('div');
-      row.className = 'field';
-      row.style.cursor = 'pointer';
-      row.innerHTML =
-        '<div style="display:flex;align-items:center;gap:10px;flex:1">' +
-          '<div class="cat-icon c-' + (c.colorKey || 'blue') + '" ' +
-            'style="width:30px;height:30px;border-radius:10px;font-size:14px;' +
-              'display:flex;align-items:center;justify-content:center">' +
-            esc(c.icon || '🏷️') +
-          '</div>' +
-          '<span style="font-weight:600">' + esc(c.name) + '</span>' +
-        '</div>' +
-        '<span class="cat-check" style="color:var(--blue);font-weight:800;opacity:' +
-          (chosenCat === c.id ? '1' : '0') + '">✓</span>';
-      row.onclick = () => {
-        chosenCat = c.id;
-        body.querySelectorAll('.cat-check').forEach(el => el.style.opacity = '0');
-        row.querySelector('.cat-check').style.opacity = '1';
-      };
-      body.appendChild(row);
-    });
-
-    // Save
-    const saveBtn = h('button', { class: 'primary' }, isNew ? 'Add expense' : 'Save');
-    saveBtn.onclick = async () => {
-      const name = document.getElementById('exp-name').value.trim();
-      const amount = Number(document.getElementById('exp-amt').value);
-      if (!name) { toast('Name required'); return; }
-      if (!amount || amount <= 0) { toast('Amount must be > 0'); return; }
-      if (!chosenCat) { toast('Pick a category'); return; }
-
-      closeSheet();
-
-      if (isNew) {
-        const periodKey = computeCurrentPeriod(App.settings.periodStartDay).key;
-        const now = new Date().toISOString();
-        await FB.addDoc(expensesCol(), {
-          name, amount,
-          categoryId: chosenCat,
-          subcategoryId: '',
-          dateAdded: now,
-          periodKey,
-        });
-        await ensureHistoryRowForCurrentPeriod();
-      } else {
-        await FB.updateDoc(FB.doc(expensesCol(), expense.id), { name, amount, categoryId: chosenCat });
-        // Recompute this period's history total.
-        await recomputeHistoryTotal(expense.periodKey);
-      }
-    };
-    body.appendChild(saveBtn);
-
-    // Delete (edit only)
-    if (!isNew) {
-      const del = h('button', { class: 'danger' }, 'Delete');
-      del.onclick = async () => {
-        if (!confirm('Delete "' + expense.name + '"?')) return;
-        closeSheet();
-        await FB.deleteDoc(FB.doc(expensesCol(), expense.id));
-        await recomputeHistoryTotal(expense.periodKey);
-      };
-      body.appendChild(del);
-    }
-  });
-}
-
-// ============================================================
-// 19. HISTORY MAINTENANCE
-// ------------------------------------------------------------
-// Called after any expense write so the period's TotalSpent
-// stays accurate. The BudgetSnapshot is written once (at the
-// first expense in a period) and then never touched — that's
-// what keeps past budgets frozen even if you change the
-// TotalBudget in Settings later.
-// ============================================================
-async function ensureHistoryRowForCurrentPeriod() {
-  const period = computeCurrentPeriod(App.settings.periodStartDay);
-  const docRef = FB.doc(historyCol(), period.key);
-  const snap = await FB.getDoc(docRef);
-  if (!snap.exists()) {
-    await FB.setDoc(docRef, {
-      periodKey: period.key,
-      periodLabel: period.label,
-      budgetSnapshot: Number(App.settings.totalBudget) || 0,
-      totalSpent: 0,
-    });
+  let startYear, startMonth;
+  if (todayDay >= startDay) {
+    startYear = todayYear;
+    startMonth = todayMonth;
+  } else {
+    const prev = new Date(todayYear, todayMonth - 1, 1);
+    startYear = prev.getFullYear();
+    startMonth = prev.getMonth();
   }
-  await recomputeHistoryTotal(period.key);
+
+  const startDate = clampDay(startYear, startMonth, startDay);
+  const endDate = new Date(startDate.getFullYear(), startDate.getMonth() + 1, startDate.getDate() - 1);
+  const key = pad2(startDate.getFullYear()) + '-' + pad2(startDate.getMonth() + 1);
+  const label = formatPeriodLabel(startDate, endDate);
+
+  const msPerDay = 86400000;
+  const daysTotal = Math.round((endDate - startDate) / msPerDay) + 1;
+  const todayMidnight = new Date(todayYear, todayMonth, todayDay);
+  const daysLeft = Math.max(0, Math.round((endDate - todayMidnight) / msPerDay));
+
+  return {
+    key, year: startDate.getFullYear(),
+    start: startDate.toISOString(), end: endDate.toISOString(),
+    label, daysTotal, daysLeft,
+  };
 }
 
-async function recomputeHistoryTotal(periodKey) {
-  if (!periodKey) return;
-  const total = App.expenses
-    .filter(e => e.periodKey === periodKey)
-    .reduce((sum, e) => sum + Number(e.amount || 0), 0);
-
-  const docRef = FB.doc(historyCol(), periodKey);
-  const snap = await FB.getDoc(docRef);
-  if (snap.exists()) {
-    await FB.updateDoc(docRef, { totalSpent: total });
-  }
+function clampDay(year, month0, day) {
+  const lastDay = new Date(year, month0 + 1, 0).getDate();
+  return new Date(year, month0, Math.min(day, lastDay));
 }
-
-// ============================================================
-// 20. BOOTSTRAP
-// ------------------------------------------------------------
-// All rendering and event wiring is driven by onAuthStateChanged
-// and the Firestore listeners set up in section 6. The initial
-// loading overlay is faded out in startApp(). This block is a
-// marker so it's obvious where the app starts executing.
-// ============================================================
-console.log('[Our Budget] app.js loaded');
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+function formatPeriodLabel(start, end) {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const sameYear = start.getFullYear() === end.getFullYear();
+  const s = start.getDate() + ' ' + months[start.getMonth()] + (sameYear ? '' : ' ' + start.getFullYear());
+  const e = end.getDate() + ' ' + months[end.getMonth()] + ' ' + end.getFullYear();
+  return s + ' – ' + e;
+}
+function labelForDay(iso) {
+  if (iso === 'unknown') return 'Unknown date';
+  const d = new Date(iso + 'T00:00:00');
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diff = Math.round((today - d) / 86400000);
+  if (diff === 0) return 'Today · ' + d.getDate() + ' ' + monthShort(d);
+  if (diff === 1) return 'Yesterday · ' + d.getDate() + ' ' + monthShort(d);
+  return d.getDate() + ' ' + monthShort(d);
+}
+function monthShort(d) {
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+}
