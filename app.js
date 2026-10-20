@@ -98,14 +98,19 @@ const SCREENS = TABS.map(t => t.id);
 // assigned in the section below (Screen renderers).
 const ScreenRenderers = {};
 
-// ============================================================
+// // ============================================================
 // 3. AUTH FLOW
 // ------------------------------------------------------------
 // On page load:
 //   1. Show loading overlay.
 //   2. Ask Firebase if a user is already signed in.
 //   3. If yes → start the app (attach Firestore listeners).
-//   4. If no → show the login screen with the Google button.
+//   4. If no → show the login screen with email + password fields.
+//
+// Email/password auth is used instead of Google Sign-In because the
+// email field is reliably present in the auth token for email/password
+// accounts. This makes the Firestore security rules
+// (request.auth.token.email in [...]) work without any caveats.
 // ============================================================
 FB.onAuthStateChanged(FB.auth, async (user) => {
   if (user) {
@@ -119,13 +124,75 @@ FB.onAuthStateChanged(FB.auth, async (user) => {
   }
 });
 
-// Sign-in button on the login screen
-document.getElementById('google-signin').addEventListener('click', async () => {
+// Helper: read the three input/error elements at once
+function getLoginFields() {
+  return {
+    email: document.getElementById('login-email').value.trim(),
+    password: document.getElementById('login-password').value,
+    errorEl: document.getElementById('login-error'),
+  };
+}
+
+// Helper: show an error message under the login form
+function showLoginError(msg) {
+  const el = document.getElementById('login-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+// Sign in with an existing account
+document.getElementById('login-btn').addEventListener('click', async () => {
+  const { email, password, errorEl } = getLoginFields();
+  errorEl.style.display = 'none';
+
+  if (!email || !password) {
+    showLoginError('Please enter email and password.');
+    return;
+  }
+
   try {
-    const provider = new FB.GoogleAuthProvider();
-    await FB.signInWithPopup(FB.auth, provider);
+    await FB.signInWithEmailAndPassword(FB.auth, email, password);
   } catch (err) {
-    toast('Could not sign in: ' + err.message);
+    // Friendly messages for the common failure cases
+    if (err.code === 'auth/invalid-credential'
+        || err.code === 'auth/wrong-password'
+        || err.code === 'auth/user-not-found') {
+      showLoginError('Wrong email or password.');
+    } else if (err.code === 'auth/too-many-requests') {
+      showLoginError('Too many attempts. Try again in a few minutes.');
+    } else {
+      showLoginError(err.message);
+    }
+  }
+});
+
+// Create a new account
+document.getElementById('signup-btn').addEventListener('click', async () => {
+  const { email, password, errorEl } = getLoginFields();
+  errorEl.style.display = 'none';
+
+  if (!email || !password) {
+    showLoginError('Enter email and password to create an account.');
+    return;
+  }
+  if (password.length < 6) {
+    showLoginError('Password must be at least 6 characters.');
+    return;
+  }
+
+  try {
+    await FB.createUserWithEmailAndPassword(FB.auth, email, password);
+    // onAuthStateChanged will fire automatically and start the app.
+  } catch (err) {
+    if (err.code === 'auth/email-already-in-use') {
+      showLoginError('An account with this email already exists. Tap "Sign in".');
+    } else if (err.code === 'auth/invalid-email') {
+      showLoginError('That email address is not valid.');
+    } else if (err.code === 'auth/weak-password') {
+      showLoginError('Password must be at least 6 characters.');
+    } else {
+      showLoginError(err.message);
+    }
   }
 });
 

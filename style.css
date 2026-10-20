@@ -1220,3 +1220,55 @@ body{
   .hero-amt{ font-size:38px; }
   .appname{ font-size:26px; }
 }
+/* ============================================================
+   EMAIL / PASSWORD LOGIN FORM
+   ------------------------------------------------------------
+   Used by the login screen in index.html. Replaces the previous
+   Google Sign-In button styling with two input fields and two
+   action buttons (Sign in / Create account).
+
+   The inputs inherit the theme via var(--bg), var(--sep), and
+   var(--text), so they look correct in both light and dark mode.
+   ============================================================ */
+.login-input {
+  width: 100%;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--bg);
+  border: 1.5px solid var(--sep);
+  border-radius: 12px;
+  font-size: 15px;
+  font-family: inherit;
+  color: var(--text);
+  outline: none;
+  box-sizing: border-box;
+}
+.login-input:focus { border-color: var(--blue); }
+
+.login-primary {
+  width: 100%;
+  padding: 14px;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: 14px;
+  font-size: 15px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  margin-top: 6px;
+}
+
+.login-secondary {
+  width: 100%;
+  padding: 14px;
+  background: transparent;
+  color: var(--blue);
+  border: none;
+  border-radius: 14px;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  margin-top: 4px;
+}
